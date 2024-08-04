@@ -1,0 +1,581 @@
+---
+title: "Customizable Forecast Tool"
+author: "Jan Kozak"
+date: "2024-07-30"
+output:
+  flexdashboard::flex_dashboard:
+    theme:
+      bootswatch: flatly
+    orientation: rows
+    source_code: embed
+runtime: shiny
+---
+
+``` {r, echo = FALSE, warning=FALSE, message=FALSE}
+library(flexdashboard)
+library(scales)
+library(shinyjs)
+library(tidyverse)
+library(forecast)
+library(plotly)
+
+useShinyjs()
+
+# Load sales data
+fsales <- "https://raw.githubusercontent.com/multidis/hult-inter-bus-reports-r/main/forecasting/sales_weekly.csv"
+sales <- read_csv(fsales)
+
+# Get the latest week
+nweek_now <- max(sales$Week)
+```
+
+``` {r echo = FALSE}
+tags$style(HTML("
+  .hidden {
+    display: none;
+  }
+  .statistics {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid #ccc;
+  }
+  .custom-header {
+    background-color: #2c3e50;
+    color: white;
+    padding: 10px;
+    text-align: center;
+  }
+  .custom-header h1 {
+    margin: 0;
+  }
+  .custom-sidebar {
+    background-color: #ecf0f1;
+    padding: 20px;
+  }
+  .custom-sidebar h4 {
+    margin-top: 0;
+  }
+  .statistics-output {
+    background-color: #dff0d8;
+    padding: 10px;
+    border-radius: 5px;
+    font-size: 1.2em;
+  }
+  .statistics-output.previous-year {
+    background-color: #2ecc71;
+    color: white;
+  }
+  .statistics-output.next-year {
+    background-color: #e74c3c;
+    color: white;
+  }
+  .statistics-output.washed-yellow {
+    background-color: #fff9c4;
+  }
+"))
+```
+
+
+Next Year Forecast {data-icon="fa-chart-line"}
+==================================================
+
+This is an adjustable interactive chart depicting the forecasted sales of different stores for various time periods. Feel free to adjust the parameters to fit your needs and analysis. 
+
+
+## Selectors
+
+
+``` {r echo = FALSE}
+fluidRow(
+  column(12,
+         div(class = "custom-sidebar",
+             selectInput("forecast_type", label = h4("Select Forecast Type"), choices = c("Weekly Forecast" = "weekly", "Quarterly Forecast" = "quarterly"), selected = "weekly"),
+
+             conditionalPanel(
+               condition = "input.forecast_type == 'weekly'",
+               selectInput("storenum_weekly", label = h4("Select Store"), choices = c("All", 1:max(sales$Store)), selected = 1),
+               sliderInput("horizon_weekly", label = h4("Forecast Horizon (weeks)"), min = 2, max = 52, value = 8, step = 1)
+             ),
+
+             conditionalPanel(
+               condition = "input.forecast_type == 'quarterly'",
+               selectInput("storenum_quarterly", label = h4("Select Store"), choices = c("All", 1:max(sales$Store)), selected = 1),
+               radioButtons("quarter", label = h4("Select Quarter"), choices = c("Q1", "Q2", "Q3", "Q4"), inline = TRUE)
+             ),
+
+             tags$div(class = "hidden", selectInput("storenum", label = "Select store: ", choices = c("All", 1:max(sales$Store)), selected = 1)),
+
+             checkboxInput("show_ci", label = h4("Show Confidence Intervals"), value = FALSE),
+             conditionalPanel(
+               condition = "input.show_ci == true",
+               sliderInput("confidence_level", label = h4("Confidence Level (%)"), min = 50, max = 99, value = 95, step = 5)
+             ),
+             
+             checkboxInput("show_trend", label = h4("Show Trendline"), value = FALSE),
+
+             div(class = "statistics",
+                 h4("Total Forecasted Sales:"),
+                 div(class = "statistics-output previous-year", textOutput("total_sales")),
+
+                 h4("Mean Forecasted Sales:"),
+                 div(class = "statistics-output previous-year", textOutput("mean_sales_forecast")),
+
+                 h4("Median Forecasted Sales:"),
+                 div(class = "statistics-output previous-year", textOutput("median_sales_forecast"))
+             )
+         )
+  )
+)
+```
+
+
+
+``` {r echo = FALSE}
+output$plotly <- renderPlotly({
+  forecast_type <- input$forecast_type
+  show_ci <- input$show_ci
+  show_trend <- input$show_trend
+  conf_level <- input$confidence_level / 100
+
+  if (forecast_type == "weekly") {
+    # Weekly forecast logic
+    storenum <- input$storenum_weekly
+    horiz <- input$horizon_weekly
+
+    sales_data <- if (storenum == "All") {
+      sales %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+    } else {
+      sales %>% filter(Store == storenum) %>% select(Week, Weekly_Sales)
+    }
+
+    sales_ts <- ts(sales_data$Weekly_Sales, frequency = 52)
+    arima_model <- auto.arima(sales_ts, seasonal.test = "seas")
+    arima_pred <- forecast(arima_model, h = horiz, level = conf_level * 100)
+
+    sales_pred <- data.frame(
+      Sales_Predicted = as.numeric(arima_pred$mean),
+      Week = 1:horiz,
+      Upper = as.numeric(arima_pred$upper),
+      Lower = as.numeric(arima_pred$lower)
+    )
+
+    p <- sales_pred %>% ggplot(aes(Week, Sales_Predicted)) +
+      geom_line(color = "#2c3e50") +
+      scale_y_continuous(labels = scales::dollar_format(scale = 1e-6, suffix = "M")) +
+      labs(x = "Weeks ahead", y = NULL, title = paste("Sales Forecast for the Next", horiz, "Weeks")) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 0, hjust = 0.5, color = "#34495e", size = 14, face = "bold"),
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5, color = "#34495e"),
+        axis.title.x = element_text(size = 14, face = "bold", color = "#34495e"),
+        axis.title.y = element_text(size = 14, face = "bold")
+      )
+
+    if (show_ci) {
+      p <- p + geom_ribbon(aes(ymin = Lower, ymax = Upper), fill = "blue", alpha = 0.2)
+    }
+    
+    if (show_trend) {
+      p <- p + geom_smooth(method = "loess", se = FALSE, color = "red")
+    }
+
+  } else if (forecast_type == "quarterly") {
+    # Quarterly forecast logic
+    storenum <- input$storenum_quarterly
+    quarter <- input$quarter
+
+    quarter_weeks <- switch(quarter,
+                            "Q1" = 1:13,
+                            "Q2" = 14:26,
+                            "Q3" = 27:39,
+                            "Q4" = 40:52)
+    sales_data <- if (storenum == "All") {
+      sales %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+    } else {
+      sales %>% filter(Store == storenum) %>% select(Week, Weekly_Sales)
+    }
+
+    sales_ts <- ts(sales_data$Weekly_Sales, frequency = 52)
+    arima_model <- auto.arima(sales_ts, seasonal.test = "seas")
+    arima_pred <- forecast(arima_model, h = max(quarter_weeks), level = conf_level * 100)
+
+    sales_pred <- data.frame(
+      Sales_Predicted = as.numeric(arima_pred$mean[quarter_weeks]),
+      Week = quarter_weeks,
+      Upper = as.numeric(arima_pred$upper[quarter_weeks]),
+      Lower = as.numeric(arima_pred$lower[quarter_weeks])
+    )
+
+    p <- sales_pred %>% ggplot(aes(Week, Sales_Predicted)) +
+      geom_line(color = "#2c3e50") +
+      scale_y_continuous(labels = scales::dollar_format(scale = 1e-6, suffix = "M")) +
+      labs(x = "Weeks ahead", y = NULL, title = paste("Sales Forecast for Quarter", quarter, "of Next Year")) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 0, hjust = 0.5, color = "#34495e", size = 14, face = "bold"),
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5, color = "#34495e"),
+        axis.title.x = element_text(size = 14, face = "bold", color = "#34495e"),
+        axis.title.y = element_text(size = 14, face = "bold")
+      )
+
+    if (show_ci) {
+      p <- p + geom_ribbon(aes(ymin = Lower, ymax = Upper), fill = "blue", alpha = 0.2)
+    }
+    
+    if (show_trend) {
+      p <- p + geom_smooth(method = "loess", se = FALSE, color = "red")
+    }
+
+  }
+
+  ggplotly(p) %>%
+    layout(
+      margin = list(b = 80)
+    )  # Adjust bottom margin to ensure x-axis labels are visible
+})
+
+output$total_sales <- renderText({
+  forecast_type <- input$forecast_type
+  storenum <- if (forecast_type == "weekly") input$storenum_weekly else input$storenum_quarterly
+  horiz <- if (forecast_type == "weekly") input$horizon_weekly else switch(input$quarter, "Q1" = 13, "Q2" = 26, "Q3" = 39, "Q4" = 52)
+
+  sales_data <- if (storenum == "All") {
+    sales %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == storenum) %>% select(Week, Weekly_Sales)
+  }
+
+  sales_ts <- ts(sales_data$Weekly_Sales, frequency = 52)
+  arima_model <- auto.arima(sales_ts, seasonal.test = "seas")
+  arima_pred <- forecast(arima_model, h = horiz)
+
+  if (forecast_type == "weekly") {
+    total_sales <- sum(arima_pred$mean[1:horiz])
+  } else {
+    quarter_weeks <- switch(input$quarter,
+                            "Q1" = 1:13,
+                            "Q2" = 14:26,
+                            "Q3" = 27:39,
+                            "Q4" = 40:52)
+    total_sales <- sum(arima_pred$mean[quarter_weeks])
+  }
+
+  paste(dollar(total_sales))
+})
+
+output$mean_sales_forecast <- renderText({
+  forecast_type <- input$forecast_type
+  storenum <- if (forecast_type == "weekly") input$storenum_weekly else input$storenum_quarterly
+  horiz <- if (forecast_type == "weekly") input$horizon_weekly else switch(input$quarter, "Q1" = 13, "Q2" = 26, "Q3" = 39, "Q4" = 52)
+
+  sales_data <- if (storenum == "All") {
+    sales %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == storenum) %>% select(Week, Weekly_Sales)
+  }
+
+  sales_ts <- ts(sales_data$Weekly_Sales, frequency = 52)
+  arima_model <- auto.arima(sales_ts, seasonal.test = "seas")
+  arima_pred <- forecast(arima_model, h = horiz)
+
+  if (forecast_type == "weekly") {
+    mean_sales <- mean(arima_pred$mean[1:horiz])
+  } else {
+    quarter_weeks <- switch(input$quarter,
+                            "Q1" = 1:13,
+                            "Q2" = 14:26,
+                            "Q3" = 27:39,
+                            "Q4" = 40:52)
+    mean_sales <- mean(arima_pred$mean[quarter_weeks])
+  }
+
+  paste(dollar(mean_sales))
+})
+
+output$median_sales_forecast <- renderText({
+  forecast_type <- input$forecast_type
+  storenum <- if (forecast_type == "weekly") input$storenum_weekly else input$storenum_quarterly
+  horiz <- if (forecast_type == "weekly") input$horizon_weekly else switch(input$quarter, "Q1" = 13, "Q2" = 26, "Q3" = 39, "Q4" = 52)
+
+  sales_data <- if (storenum == "All") {
+    sales %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == storenum) %>% select(Week, Weekly_Sales)
+  }
+
+  sales_ts <- ts(sales_data$Weekly_Sales, frequency = 52)
+  arima_model <- auto.arima(sales_ts, seasonal.test = "seas")
+  arima_pred <- forecast(arima_model, h = horiz)
+
+  if (forecast_type == "weekly") {
+    median_sales <- median(arima_pred$mean[1:horiz])
+  } else {
+    quarter_weeks <- switch(input$quarter,
+                            "Q1" = 1:13,
+                            "Q2" = 14:26,
+                            "Q3" = 27:39,
+                            "Q4" = 40:52)
+    median_sales <- median(arima_pred$mean[quarter_weeks])
+  }
+
+  paste(dollar(median_sales))
+})
+``` 
+
+### {.content}
+
+```{r echo = FALSE}
+plotlyOutput("plotly", height = "600px", width = "100%")
+```
+
+Comparative Analysis {data-icon="fa-balance-scale"}
+==================================================
+This page compares the sales from previous year with projected sales for the upcoming year. 
+
+## Selectors
+
+```{r echo = FALSE}
+fluidRow(
+  column(12,
+         div(class = "custom-sidebar",
+             selectInput("store_comparison", label = h4("Select Store"), choices = c("All", 1:max(sales$Store)), selected = "All"),
+
+             h4("Mean Sales:"),
+             div(class = "statistics-output previous-year", textOutput("mean_sales_actual_comparison")),
+             div(class = "statistics-output next-year", textOutput("mean_sales_forecast_comparison")),
+
+             h4("Median Sales:"),
+             div(class = "statistics-output previous-year", textOutput("median_sales_actual_comparison")),
+             div(class = "statistics-output next-year", textOutput("median_sales_forecast_comparison")),
+
+             h4("Highest Growth Quarter:"),
+             div(class = "statistics-output washed-yellow", uiOutput("highest_growth_quarter")),
+
+             h4("Lowest Growth Quarter:"),
+             div(class = "statistics-output washed-yellow", uiOutput("lowest_growth_quarter"))
+         )
+  )
+)
+```
+
+```{r echo = FALSE}
+output$mean_sales_actual_comparison <- renderText({
+  store <- input$store_comparison
+  print(paste("Selected store for mean_sales_actual_comparison: ", store))
+  
+  actual_sales <- if (store == "All") {
+    sales %>% filter(Week <= nweek_now) %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == store & Week <= nweek_now) %>% select(Week, Weekly_Sales)
+  }
+  
+  mean_sales <- mean(actual_sales$Weekly_Sales)
+  paste("Previous Year: ", dollar(mean_sales))
+})
+
+output$mean_sales_forecast_comparison <- renderText({
+  store <- input$store_comparison
+  print(paste("Selected store for mean_sales_forecast_comparison: ", store))
+  
+  actual_sales <- if (store == "All") {
+    sales %>% filter(Week <= nweek_now) %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == store & Week <= nweek_now) %>% select(Week, Weekly_Sales)
+  }
+  
+  actual_ts <- ts(actual_sales$Weekly_Sales, frequency = 52)
+  forecast_arima <- forecast(auto.arima(actual_ts), h = 52)
+  
+  mean_sales_forecast <- mean(forecast_arima$mean)
+  paste("Next Year: ", dollar(mean_sales_forecast))
+})
+
+output$median_sales_actual_comparison <- renderText({
+  store <- input$store_comparison
+  print(paste("Selected store for median_sales_actual_comparison: ", store))
+  
+  actual_sales <- if (store == "All") {
+    sales %>% filter(Week <= nweek_now) %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == store & Week <= nweek_now) %>% select(Week, Weekly_Sales)
+  }
+  
+  median_sales <- median(actual_sales$Weekly_Sales)
+  paste("Previous Year: ", dollar(median_sales))
+})
+
+output$median_sales_forecast_comparison <- renderText({
+  store <- input$store_comparison
+  print(paste("Selected store for median_sales_forecast_comparison: ", store))
+  
+  actual_sales <- if (store == "All") {
+    sales %>% filter(Week <= nweek_now) %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == store & Week <= nweek_now) %>% select(Week, Weekly_Sales)
+  }
+  
+  actual_ts <- ts(actual_sales$Weekly_Sales, frequency = 52)
+  forecast_arima <- forecast(auto.arima(actual_ts), h = 52)
+  
+  median_sales_forecast <- median(forecast_arima$mean)
+  paste("Next Year: ", dollar(median_sales_forecast))
+})
+``` 
+
+```{r echo = FALSE}
+output$highest_growth_quarter <- renderUI({
+  store <- input$store_comparison
+  print(paste("Selected store for highest_growth_quarter: ", store))
+  
+  if (is.null(store) || store == "") {
+    return(HTML("No store selected"))
+  }
+
+  actual_sales <- if (store == "All") {
+    sales %>% filter(Week <= nweek_now) %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == store & Week <= nweek_now) %>% select(Week, Weekly_Sales)
+  }
+  
+  if (nrow(actual_sales) == 0) {
+    return(HTML("No data available for the selected store"))
+  }
+
+  actual_ts <- ts(actual_sales$Weekly_Sales, frequency = 52)
+  forecast_arima <- forecast(auto.arima(actual_ts), h = 52)
+  
+  quarters <- list(
+    "Q1" = 1:13,
+    "Q2" = 14:26,
+    "Q3" = 27:39,
+    "Q4" = 40:52
+  )
+  
+  growths <- sapply(names(quarters), function(q) {
+    past_sales <- sum(actual_sales$Weekly_Sales[quarters[[q]]], na.rm = TRUE)
+    forecast_sales <- sum(forecast_arima$mean[quarters[[q]]], na.rm = TRUE)
+    if (past_sales == 0) {
+      return(NA)  # Avoid division by zero
+    }
+    (forecast_sales - past_sales) / past_sales * 100
+  })
+  
+  growths <- na.omit(growths)
+  print(paste("Growths for highest_growth_quarter: ", growths))
+
+  if (length(growths) == 0) {
+    return(HTML("No growth data available for the selected store"))
+  }
+  
+  max_growth_q <- names(growths)[which.max(growths)]
+  max_growth <- growths[max_growth_q]
+  
+  color <- if (max_growth > 0) "green" else "red"
+  HTML(paste0("Highest Growth Quarter: ", max_growth_q, " (", sprintf("<span style='color:%s'>%.2f%%</span>", color, max_growth), ")"))
+})
+
+output$lowest_growth_quarter <- renderUI({
+  store <- input$store_comparison
+  print(paste("Selected store for lowest_growth_quarter: ", store))
+  
+  if (is.null(store) || store == "") {
+    return(HTML("No store selected"))
+  }
+
+  actual_sales <- if (store == "All") {
+    sales %>% filter(Week <= nweek_now) %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == store & Week <= nweek_now) %>% select(Week, Weekly_Sales)
+  }
+  
+  if (nrow(actual_sales) == 0) {
+    return(HTML("No data available for the selected store"))
+  }
+
+  actual_ts <- ts(actual_sales$Weekly_Sales, frequency = 52)
+  forecast_arima <- forecast(auto.arima(actual_ts), h = 52)
+  
+  quarters <- list(
+    "Q1" = 1:13,
+    "Q2" = 14:26,
+    "Q3" = 27:39,
+    "Q4" = 40:52
+  )
+  growths <- sapply(names(quarters), function(q) {
+    past_sales <- sum(actual_sales$Weekly_Sales[quarters[[q]]], na.rm = TRUE)
+    forecast_sales <- sum(forecast_arima$mean[quarters[[q]]], na.rm = TRUE)
+    if (past_sales == 0) {
+      return(NA)
+    }
+    (forecast_sales - past_sales) / past_sales * 100
+  })
+  growths <- na.omit(growths)
+  print(paste("Growths for lowest_growth_quarter: ", growths))
+
+  if (length(growths) == 0) {
+    return(HTML("No growth data available for the selected store"))
+  }
+  
+  min_growth_q <- names(growths)[which.min(growths)]
+  min_growth <- growths[min_growth_q]
+  
+  color <- if (min_growth > 0) "green" else "red"
+  HTML(paste0("Lowest Growth Quarter: ", min_growth_q, " (", sprintf("<span style='color:%s'>%.2f%%</span>", color, min_growth), ")"))
+})
+```
+
+``` {r echo = FALSE}
+output$comparison_plot <- renderPlotly({
+  store <- input$store_comparison
+  print(paste("Selected store for comparison_plot: ", store))
+  
+  actual_sales <- if (store == "All") {
+    sales %>% filter(Week <= nweek_now) %>% group_by(Week) %>% summarise(Weekly_Sales = sum(Weekly_Sales))
+  } else {
+    sales %>% filter(Store == store & Week <= nweek_now) %>% select(Week, Weekly_Sales)
+  }
+  
+  actual_ts <- ts(actual_sales$Weekly_Sales, frequency = 52)
+  forecast_arima <- forecast(auto.arima(actual_ts), h = 52)
+  
+  future_weeks <- seq(nweek_now + 1, nweek_now + 52, by = 1)
+  forecast_sales <- data.frame(
+    Week = future_weeks,
+    Weekly_Sales = as.numeric(forecast_arima$mean)
+  )
+  
+  actual_sales <- actual_sales %>%
+    mutate(Calendar_Week = Week %% 52 + 1)
+  forecast_sales <- forecast_sales %>%
+    mutate(Calendar_Week = Week %% 52 + 1)
+  
+  comparison_data <- bind_rows(
+    actual_sales %>% mutate(Type = "Previous Year"),
+    forecast_sales %>% mutate(Type = "Next Year")
+  )
+  
+  p <- ggplot(comparison_data, aes(x = Calendar_Week, y = Weekly_Sales, color = Type)) +
+    geom_line(linewidth = 1.2) +
+    scale_color_manual(values = c("Previous Year" = "#2ecc71", "Next Year" = "#e74c3c")) +
+    scale_y_continuous(labels = scales::dollar_format(scale = 1e-6, suffix = "M")) +
+    labs(x = "Weeks of Calendar Year", y = NULL, title = "Previous Year vs Next Year Projected Weekly Sales") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(color = "#2c3e50", size = 20, face = "bold", hjust = 0.5),
+      axis.title.x = element_text(color = "#2c3e50", size = 14, face = "bold"),
+      axis.title.y = element_text(size = 14, face = "bold"),
+      axis.text = element_text(color = "#34495e"),
+      legend.title = element_text(color = "#2c3e50", size = 14, face = "bold"),
+      legend.text = element_text(color = "#2c3e50", size = 12)
+    )
+  
+  ggplotly(p) %>%
+    layout(legend = list(title = list(text = "Legend")))
+})
+```
+
+### {.content}
+
+``` {r echo = FALSE}
+plotlyOutput("comparison_plot", height = "600px", width = "100%")
+``` 
